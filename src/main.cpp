@@ -7,31 +7,16 @@ https://github.com/ldab/toilet_controller
 Distributed as-is; no warranty is given.
 ******************************************************************************/
 
-#define BLYNK_PRINT Serial // Defines the object that is used for printing
-// #define BLYNK_DEBUG        // Optional, this enables more detailed prints
-// #define APP_DEBUG
-
 #include <Arduino.h>
+// #include <FS.h>
+// #include <SPIFFS.h>
 
-// Blynk and WiFi
-
-#define USE_SSL
-
-#if defined(ESP32)
 #include <ESPmDNS.h>
 #include <WiFi.h>
-#ifdef USE_SSL
-#include <BlynkSimpleEsp32_SSL.h>
-#include <WiFiClientSecure.h>
-#else
-#include <BlynkSimpleEsp32.h>
-#include <WiFiClient.h>
-#endif
-#endif
-
-#include "BlynkEdgent.h"
 
 #include "PapertrailLogger.h"
+#include "Ticker.h"
+#include "WiFiManager.h"
 
 // OTA
 #include <ArduinoOTA.h>
@@ -41,7 +26,11 @@ Distributed as-is; no warranty is given.
 #include <SPI.h>
 #include <Wire.h>
 
+// #include <ArduinoJson.h> //https://github.com/bblanchon/ArduinoJson
+
 #include "Adafruit_MAX31855.h"
+
+#include "LCD16x2.h"
 
 #ifdef VERBOSE
 #define DBG(msg, ...)                                                          \
@@ -70,6 +59,8 @@ Distributed as-is; no warranty is given.
 #define FINAL_TEMPERATURE 550
 #define BIG_FLUSH         35
 #define DIFFERENTIAL      5 // degC
+#define I2C_SDA           13
+#define I2C_SCL           12
 
 float temp;
 float tInt;
@@ -79,58 +70,87 @@ uint32_t initMillis = 0;
 uint32_t holdMillis = 0;
 int step            = 0;
 
-// Timer instance numbers
-int controlTimer;
+char mqtt_server[40];
+char mqtt_port[6]     = "8080";
+char api_token[34]    = "YOUR_API_TOKEN";
+bool shouldSaveConfig = false;
 
+WiFiManager wm;
 PapertrailLogger *errorLog;
 Adafruit_MAX31855 thermocouple(SPI_CLK, SPI_CS, SPI_MISO);
+LCD16x2 lcd;
+Ticker controlTimer;
+Ticker buttonCheck;
 
-BLYNK_CONNECTED()
-{
-  esp_reset_reason_t reset_reason = esp_reset_reason();
-  if (reset_reason == ESP_RST_PANIC || reset_reason == ESP_RST_INT_WDT ||
-      reset_reason == ESP_RST_TASK_WDT || reset_reason == ESP_RST_WDT ||
-      reset_reason == ESP_RST_BROWNOUT) {
-    Blynk.logEvent("wdt", reset_reason);
-  }
+WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server,
+                                        40);
+WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 12);
+WiFiManagerParameter custom_mqtt_token("token", "mqtt token", api_token, 40);
 
-  // TODO recover from cloud
+WiFiManagerParameter
+    custom_html("<p style=\"color:pink;font-weight:Bold;\">This Is Custom "
+                "HTML</p>"); // only custom html
+const char _customHtml_checkbox[] = "type=\"checkbox\"";
+WiFiManagerParameter custom_checkbox("my_checkbox", "My Checkbox", "T", 2,
+                                     _customHtml_checkbox, WFM_LABEL_AFTER);
 
-  else if (!edgentTimer.isEnabled(controlTimer)) {
-    Blynk.virtualWrite(V7, "Idle 💤");
-    Blynk.virtualWrite(V10, LOW);
-  }
-}
+const char _customHtml_button[] = "type=\"submit\"";
+WiFiManagerParameter custom_button("flush", "", "Flush", 6, _customHtml_button,
+                                   WFM_LABEL_DEFAULT);
 
-BLYNK_WRITE(V50) { step = param.asInt(); }
+const char *bufferStr = R"(
+  <!-- INPUT CHOICE -->
+  <br/>
+  <p>Select Choice</p>
+  <input style='display: inline-block;' type='radio' id='choice1' name='program_selection' value='1'>
+  <label for='choice1'>Choice1</label><br/>
+  <input style='display: inline-block;' type='radio' id='choice2' name='program_selection' value='2'>
+  <label for='choice2'>Choice2</label><br/>
+  <!-- INPUT SELECT -->
+  <br/>
+  <label for='input_select'>Label for Input Select</label>
+  <select name="input_select" id="input_select" class="button">
+  <option value="0">Option 1</option>
+  <option value="1" selected>Option 2</option>
+  <option value="2">Option 3</option>
+  <option value="3">Option 4</option>
+  </select>
+  )";
 
-BLYNK_WRITE(V10)
-{
-  uint8_t flushButton = param.asInt();
+WiFiManagerParameter custom_html_inputs(bufferStr);
 
-  if (flushButton && !edgentTimer.isEnabled(controlTimer)) {
-    step       = 0;
-    initMillis = millis();
-    digitalWrite(FAN, HIGH);
-    Blynk.virtualWrite(V7, "Flushing 🔥💩");
-    edgentTimer.enable(controlTimer);
-  } else {
-    DBG("Already flushing\n"); // TODO increase timer
-    Blynk.virtualWrite(V10, HIGH);
-  }
-}
+// BLYNK_CONNECTED()
+// {
+//   esp_reset_reason_t reset_reason = esp_reset_reason();
+//   if (reset_reason == ESP_RST_PANIC || reset_reason == ESP_RST_INT_WDT ||
+//       reset_reason == ESP_RST_TASK_WDT || reset_reason == ESP_RST_WDT ||
+//       reset_reason == ESP_RST_BROWNOUT) {
+//     Blynk.logEvent("wdt", reset_reason);
+//   }
 
-void sendData()
-{
-  Blynk.virtualWrite(V0, temp);
-  Blynk.virtualWrite(V8, tInt);
-  Blynk.virtualWrite(V50, step);
-  Blynk.virtualWrite(V51, WiFi.RSSI());
+//   // TODO recover from cloud
 
-  if (edgentTimer.isEnabled(controlTimer)) {
-    Blynk.virtualWrite(V5, (int)((millis() - initMillis) / (60 * 1000)));
-  }
-}
+//   else if (!edgentTimer.isEnabled(controlTimer)) {
+//     Blynk.virtualWrite(V7, "Idle 💤");
+//     Blynk.virtualWrite(V10, LOW);
+//   }
+// }
+
+// BLYNK_WRITE(V10)
+// {
+//   uint8_t flushButton = param.asInt();
+
+//   if (flushButton && !edgentTimer.isEnabled(controlTimer)) {
+//     step       = 0;
+//     initMillis = millis();
+//     digitalWrite(FAN, HIGH);
+//     Blynk.virtualWrite(V7, "Flushing 🔥💩");
+//     edgentTimer.enable(controlTimer);
+//   } else {
+//     DBG("Already flushing\n"); // TODO increase timer
+//     Blynk.virtualWrite(V10, HIGH);
+//   }
+// }
 
 void safetyCheck()
 {
@@ -169,7 +189,7 @@ void getTemp()
       temp = NAN;
       tErr = true;
 
-      Blynk.logEvent("thermocouple_error", error);
+      // Blynk.logEvent("thermocouple_error", error);
 
       digitalWrite(ELEMENT, LOW);
     }
@@ -189,13 +209,13 @@ void holdTimer(uint32_t _segment)
   uint32_t _elapsed = (millis() - holdMillis) / (60 * 1000);
   String _remaining = String(_segment - _elapsed);
   DBG("Remaining: %s\n", _remaining.c_str());
-  Blynk.virtualWrite(V7, "Burning 🔥💩" + _remaining + " min");
+  // Blynk.virtualWrite(V7, "Burning 🔥💩" + _remaining + " min");
 
   if (_elapsed >= _segment) {
     step++;
     holdMillis = 0;
     DBG("Done with hold, step: %d\n", step);
-    Blynk.virtualWrite(V7, "Flushing 🔥💩");
+    // Blynk.virtualWrite(V7, "Flushing 🔥💩");
   }
 }
 
@@ -213,9 +233,9 @@ void tControl()
       char endInfo[64];
       sprintf(endInfo, "Finished flushing after, after: %d:%d", h, m);
       DBG("%s", endInfo);
-      Blynk.logEvent("info", endInfo);
-      Blynk.virtualWrite(V10, LOW);
-      Blynk.virtualWrite(V7, "Cooling ❄️");
+      // Blynk.logEvent("info", endInfo);
+      // Blynk.virtualWrite(V10, LOW);
+      // Blynk.virtualWrite(V7, "Cooling ❄️");
     }
     if (temp <= 100) {
       DBG("Finished cooling\n");
@@ -226,7 +246,6 @@ void tControl()
   if (step == 2) {
     digitalWrite(FAN, LOW);
     digitalWrite(ELEMENT, LOW); // just in case
-    ESP.restart();
     return;
   }
 
@@ -250,6 +269,90 @@ void tControl()
   }
 }
 
+void checkButton(void)
+{
+  uint8_t buttons = lcd.readButtons();
+
+  if (buttons == 0b1111)
+    return;
+
+  lcd.lcdGoToXY(7, 1);
+  if (buttons & 0x01)
+    lcd.lcdWrite("0");
+  else
+    lcd.lcdWrite("1");
+
+  lcd.lcdGoToXY(15, 1);
+  if (buttons & 0x02)
+    lcd.lcdWrite("0");
+  else
+    lcd.lcdWrite("1");
+
+  lcd.lcdGoToXY(7, 2);
+  if (buttons & 0x04)
+    lcd.lcdWrite("0");
+  else
+    lcd.lcdWrite("1");
+
+  lcd.lcdGoToXY(15, 2);
+  if (buttons & 0x08)
+    lcd.lcdWrite("0");
+  else
+    lcd.lcdWrite("1");
+}
+
+void saveParamsCallback()
+{
+  Serial.println("Get Params:");
+  Serial.print(custom_mqtt_server.getID());
+  Serial.print(" : ");
+  Serial.println(custom_mqtt_server.getValue());
+
+  controlTimer.attach_ms(5520, tControl);
+}
+
+void saveWifiCallback()
+{
+  Serial.println("[CALLBACK] saveCallback fired");
+  shouldSaveConfig = true;
+  strcpy(mqtt_server, custom_mqtt_server.getValue());
+  strcpy(mqtt_port, custom_mqtt_port.getValue());
+  strcpy(api_token, custom_mqtt_token.getValue());
+  Serial.println("The values in the file are: ");
+  Serial.println("\tmqtt_server : " + String(mqtt_server));
+  Serial.println("\tmqtt_port : " + String(mqtt_port));
+  Serial.println("\tapi_token : " + String(api_token));
+
+  //   if (shouldSaveConfig) {
+  //     Serial.println("saving config");
+  // #ifdef ARDUINOJSON_VERSION_MAJOR >= 6
+  //     DynamicJsonDocument json(1024);
+  // #else
+  //     DynamicJsonBuffer jsonBuffer;
+  //     JsonObject &json = jsonBuffer.createObject();
+  // #endif
+  //     json["mqtt_server"] = mqtt_server;
+  //     json["mqtt_port"]   = mqtt_port;
+  //     json["api_token"]   = api_token;
+
+  //     File configFile     = SPIFFS.open("/config.json", "w");
+  //     if (!configFile) {
+  //       Serial.println("failed to open config file for writing");
+  //     }
+
+  // #ifdef ARDUINOJSON_VERSION_MAJOR >= 6
+  //     serializeJson(json, Serial);
+  //     serializeJson(json, configFile);
+  // #else
+  //     json.printTo(Serial);
+  //     json.printTo(configFile);
+  // #endif
+  //     configFile.close();
+  //     // end save
+
+  ESP.restart();
+}
+
 void IRAM_ATTR ISR()
 {
   static volatile uint32_t count      = 0;
@@ -270,42 +373,44 @@ void pinInit()
   attachInterrupt(FAN_FB, ISR, FALLING);
 }
 
-void otaInit()
-{
-  ArduinoOTA.setHostname("toilet");
+// void loadSpiffs()
+// {
+//   // read configuration from FS json
+//   Serial.println("mounting FS...");
 
-  ArduinoOTA.onStart([]() {
-    String type;
-    if (ArduinoOTA.getCommand() == U_FLASH) {
-      type = "sketch";
-    } else { // U_FS
-      type = "filesystem";
-    }
+//   if (SPIFFS.begin()) {
+//     Serial.println("mounted file system");
+//     if (SPIFFS.exists("/config.json")) {
+//       // file exists, reading and loading
+//       Serial.println("reading config file");
+//       File configFile = SPIFFS.open("/config.json", "r");
+//       if (configFile) {
+//         Serial.println("opened config file");
+//         size_t size = configFile.size();
+//         // Allocate a buffer to store contents of the file.
+//         std::unique_ptr<char[]> buf(new char[size]);
 
-    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
-    Serial.println("Start updating " + type);
-  });
-  ArduinoOTA.onEnd([]() { Serial.println("\nEnd"); });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) {
-      Serial.println("Auth Failed");
-    } else if (error == OTA_BEGIN_ERROR) {
-      Serial.println("Begin Failed");
-    } else if (error == OTA_CONNECT_ERROR) {
-      Serial.println("Connect Failed");
-    } else if (error == OTA_RECEIVE_ERROR) {
-      Serial.println("Receive Failed");
-    } else if (error == OTA_END_ERROR) {
-      Serial.println("End Failed");
-    }
-  });
+//         configFile.readBytes(buf.get(), size);
 
-  ArduinoOTA.begin();
-}
+//         DynamicJsonDocument json(1024);
+//         auto deserializeError = deserializeJson(json, buf.get());
+//         serializeJson(json, Serial);
+
+//         if (!deserializeError) {
+//           Serial.println("\nparsed json");
+//           strcpy(mqtt_server, json["mqtt_server"]);
+//           strcpy(mqtt_port, json["mqtt_port"]);
+//           strcpy(api_token, json["api_token"]);
+//         } else {
+//           Serial.println("failed to load json config");
+//         }
+//         configFile.close();
+//       }
+//     }
+//   } else {
+//     Serial.println("failed to mount FS");
+//   }
+// }
 
 void setup()
 {
@@ -331,21 +436,76 @@ void setup()
   } else
     DBG("MAX31855 Good\n");
 
-  // wifi_station_set_hostname("kiln"); //setHostname
-  BlynkEdgent.begin();
+  Wire.begin(I2C_SDA, I2C_SCL);
+  DBG("Board ID: 0x%02X\n", lcd.getID());
+  lcd.lcdClear();
 
-  otaInit();
+  lcd.lcdGoToXY(2, 1);
+  lcd.lcdWrite("BUT1:");
 
-  edgentTimer.setInterval(2000L, getTemp);
-  edgentTimer.setInterval(10000L, sendData);
+  lcd.lcdGoToXY(10, 1);
+  lcd.lcdWrite("BUT2:");
 
-  controlTimer = edgentTimer.setInterval(5530L, tControl);
-  edgentTimer.disable(controlTimer); // enable it after button is pressed
+  lcd.lcdGoToXY(2, 2);
+  lcd.lcdWrite("BUT3:");
+
+  lcd.lcdGoToXY(10, 2);
+  lcd.lcdWrite("BUT4:");
+
+  // loadSpiffs();
+
+  WiFi.mode(WIFI_STA);
+  wm.setConfigPortalBlocking(false);
+  wm.setConnectTimeout(20); // how long to try to connect for before continuing
+  wm.setConnectRetries(2);
+  wm.setConfigPortalTimeout(60); // auto close configportal after n seconds
+  wm.setAPClientCheck(true);     // avoid timeout if client connected to softap
+  wm.setHostname("toilet");
+  wm.setShowPassword(true);
+
+  wm.setTitle("💩");
+  wm.setDarkMode(true);
+  wm.addParameter(&custom_mqtt_server);
+  wm.addParameter(&custom_button);
+  // wm.setCustomHeadElement("<style>html{filter: invert(100%); -webkit-filter:
+  // invert(100%);}</style>");
+  wm.setSaveParamsCallback(saveParamsCallback);
+  wm.setSaveConfigCallback(saveWifiCallback);
+
+  // edgentTimer.setInterval(2000L, getTemp);
+  // edgentTimer.setInterval(10000L, sendData);
+
+  // controlTimer = edgentTimer.setInterval(5530L, tControl);
+  // edgentTimer.disable(controlTimer); // enable it after button is pressed
+
+  bool res;
+  res = wm.autoConnect();
+
+  if (!res) {
+    Serial.println("Failed to connect or hit timeout");
+    // ESP.restart();
+  } else {
+    // if you get here you have connected to the WiFi
+    Serial.println("connected...yeey :)");
+    ArduinoOTA.begin();
+
+    /*
+      Set cutom menu via menu[] or vector
+      const char* menu[] =
+      {"wifi","wifinoscan","info","param","close","sep","erase","restart","exit"};
+      wm.setMenu(menu,9); // custom menu array must provide length
+    */
+    std::vector<const char *> menu = {"param", "info",    "sep",
+                                      "close", "restart", "erase"};
+    wm.setMenu(menu); // custom menu, pass vector
+    wm.startWebPortal();
+  }
+
+  buttonCheck.attach_ms(500, checkButton);
 }
 
 void loop()
 {
   ArduinoOTA.handle();
-  BlynkEdgent.run();
-  //  timer.run(); // use edgentTimer
+  wm.process();
 }
