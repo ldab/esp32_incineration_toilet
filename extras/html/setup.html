@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ESP Wi-Fi Manager</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.7.2/css/all.css" integrity="sha384-fnmOCqbTlWIlj8LyTjo7mOUStjsKC4pOpQbqyi7RrhN7udi9RwhKkMHpvLbHG9Sr" crossorigin="anonymous">
+  <style>
+    html {
+        font-family: Calibri;
+        display: inline-block;
+        text-align: center;
+    }
+
+    h2 {
+        font-size: 3rem;
+    }
+
+    p {
+        font-size: 3rem;
+    }
+
+    body {
+        max-width: 600px;
+        margin: 0px auto;
+        padding-bottom: 25px;
+    }
+
+    input,
+    button,
+    select,
+    .msg {
+        border-radius: 0.3rem;
+        width: 100%;
+    }
+
+    .switch {
+        position: relative;
+        display: inline-block;
+        width: 120px;
+        height: 68px;
+    }
+
+    .switch input {
+        display: none;
+    }
+
+    .slider {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        border-radius: 6px;
+    }
+
+    .slider::before {
+        position: absolute;
+        content: "";
+        height: 52px;
+        width: 52px;
+        left: 8px;
+        bottom: 8px;
+        background-color: #fff;
+        -webkit-transition: 0.4s;
+        transition: 0.4s;
+        border-radius: 3px;
+    }
+
+    input:checked+.slider {
+        background-color: #b30000;
+    }
+
+    input:checked+.slider::before {
+        -webkit-transform: translateX(52px);
+        -ms-transform: translateX(52px);
+        transform: translateX(52px);
+    }
+
+    button,
+    input[type='button'],
+    input[type='submit'] {
+        cursor: pointer;
+        border: 0;
+        background-color: #1fa3ec;
+        color: #fff;
+        line-height: 2.4rem;
+        font-size: 1.2rem;
+        width: 100%;
+    }
+
+    button {
+        transition: 0s opacity;
+        transition-delay: 3s;
+        transition-duration: 0s;
+        cursor: pointer;
+    }
+
+    button.D {
+        background-color: #dc3630;
+    }
+
+    button:active {
+        opacity: 50% !important;
+        cursor: wait;
+        transition-delay: 0s;
+    }
+</style>
+</head>
+<body>
+  <div class="topnav">
+    <h1>ESP Wi-Fi Manager</h1>
+  </div>
+  <div class="content">
+    <div class="card-grid">
+      <div class="card">
+        <form action="/" method="POST">
+          <p>
+            <label for="ssid">SSID</label>
+            <input type="text" id ="ssid" name="ssid"><br>
+            <label for="pass">Password</label>
+            <input type="text" id ="pass" name="pass"><br>
+            <input type ="submit" value ="Submit">
+          </p>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
