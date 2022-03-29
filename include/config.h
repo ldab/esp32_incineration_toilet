@@ -24,6 +24,10 @@ const char HTTP_CONFIG[] PROGMEM = R"rawliteral(
               <input type="text" id ="ssid" name="ssid"><br>
               <label for="pass">Password</label>
               <input type="text" id ="pass" name="pass"><br>
+              <label for="server">Server</label>
+              <input type="text" id ="server" name="server"><br>
+              <label for="token">Token</label>
+              <input type="text" id ="token" name="token"><br>
               <input type ="submit" value ="Submit">
             </p>
           </form>

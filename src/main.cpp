@@ -1,20 +1,28 @@
 #include "Arduino.h"
-#include "Ticker.h"
+#include <Ticker.h>
 
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 
-#include "ESPAsyncWebServer.h"
 #include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <Update.h>
 #include <WiFi.h>
 
-#include "Update.h"
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+#include "SPIFFS.h"
 
 #include "html_strings.h"
 
 String ssid, pass;
 
+const char *serverPath = "/server.txt";
+const char *tokenPath  = "/token.txt";
+
 Ticker tempTimer;
+Ticker restart;
 
 DNSServer dnsServer;
 AsyncWebServer server(80);
@@ -22,6 +30,8 @@ AsyncEventSource events("/events"); // event source (Server-Sent events)
 AsyncWebSocket ws("/ws");           // access at ws://[esp ip]/ws
 
 String processor(const String &var);
+String readFile(fs::FS &fs, const char *path);
+void writeFile(fs::FS &fs, const char *path, const char *message);
 
 class CaptiveRequestHandler : public AsyncWebHandler
 {
@@ -41,16 +51,63 @@ class CaptiveRequestHandler : public AsyncWebHandler
   }
 };
 
+void espRestart() { ESP.restart(); }
+
+// Send notification to HA, max 32 bytes
+void notify(char *msg, size_t length)
+{
+  HTTPClient http;
+  WiFiClientSecure client;
+
+  String url   = readFile(SPIFFS, serverPath);
+  String token = readFile(SPIFFS, tokenPath);
+
+  // client.setCACert(CA_CERT);
+  client.setInsecure();
+  if (!client.connect(url.c_str(), 8123))
+    Serial.println("Connection failed!");
+  else {
+    char _msg[32];
+    sprintf(_msg, "Content-Length: %u", 15 + length);
+    client.println("POST /api/services/notify/notify HTTP/1.1");
+    client.print("Host: ");
+    client.println(url);
+    client.println("Content-Type: application/json");
+    client.println("Content-Length: 17");
+    client.print("Authorization: Bearer ");
+    client.println(token);
+    client.println();
+    sprintf(_msg, "{\"message\": \"%s\"}\n", msg);
+    Serial.println(_msg);
+    client.println(_msg);
+
+    // while (client.connected()) {
+    //   String line = client.readStringUntil('\n');
+    //   if (line == "\r") {
+    //     break;
+    //   }
+    //   Serial.println(line);
+    // }
+    // // if there are incoming bytes available
+    // // from the server, read them and print them:
+    // while (client.available()) {
+    //   char c = client.read();
+    //   Serial.write(c);
+    // }
+    client.stop();
+  }
+}
+
 void onUpload(AsyncWebServerRequest *request, String filename, size_t index,
               uint8_t *data, size_t len, bool final)
 {
   if (!index) {
     Serial.printf("Update Start: %s\n", filename.c_str());
-    // Update.runAsync(true);
-    if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       Update.printError(Serial);
     }
   }
+  Serial.printf("Progress: %u of %u\r", Update.progress(), Update.size());
   if (!Update.hasError()) {
     if (Update.write(data, len) != len) {
       Update.printError(Serial);
@@ -60,8 +117,7 @@ void onUpload(AsyncWebServerRequest *request, String filename, size_t index,
     if (Update.end(true)) {
       Serial.printf("Update Success: %uB\n", index + len);
       request->redirect("/");
-      delay(1000);
-      ESP.restart();
+      restart.once_ms(1000, espRestart);
     } else {
       Update.printError(Serial);
     }
@@ -117,20 +173,22 @@ void captiveServer()
           ssid = p->value().c_str();
           Serial.print("SSID set to: ");
           Serial.println(ssid);
-          // Write file to save value
-          // writeFile(LittleFS, ssidPath, ssid.c_str());
         }
-        // HTTP POST pass value
         if (p->name() == "pass") {
           pass = p->value().c_str();
           Serial.print("Password set to: ");
           Serial.println(pass);
-          // Write file to save value
-          // writeFile(LittleFS, passPath, pass.c_str());
+        }
+        if (p->name() == "server") {
+          String url = p->value().c_str();
+          writeFile(SPIFFS, serverPath, url.c_str());
+        }
+        if (p->name() == "token") {
+          String token = p->value().c_str();
+          writeFile(SPIFFS, tokenPath, token.c_str());
         }
       }
     }
-    WiFi.mode(WIFI_STA);
     WiFi.persistent(true);
     WiFi.begin(ssid.c_str(), pass.c_str());
     Serial.print("Connecting to WiFi ..");
@@ -139,10 +197,45 @@ void captiveServer()
       delay(100);
     }
     Serial.println("connected");
-    dnsServer.stop();
-    ESP.restart();
-    // request->send_P(200, "text/html", HTTP_CONFIG, processor);
+    restart.once_ms(1000, espRestart);
+    request->redirect("http://" + WiFi.localIP().toString());
   });
+}
+
+// Read File from SPIFFS
+String readFile(fs::FS &fs, const char *path)
+{
+  Serial.printf("Reading file: %s\r\n", path);
+
+  File file = fs.open(path);
+  if (!file || file.isDirectory()) {
+    Serial.println("- failed to open file for reading");
+    return String();
+  }
+
+  String fileContent;
+  while (file.available()) {
+    fileContent = file.readStringUntil('\n');
+    break;
+  }
+  return fileContent;
+}
+
+// Write file to SPIFFS
+void writeFile(fs::FS &fs, const char *path, const char *message)
+{
+  Serial.printf("Writing file: %s\r\n", path);
+
+  File file = fs.open(path, FILE_WRITE);
+  if (!file) {
+    Serial.println("- failed to open file for writing");
+    return;
+  }
+  if (file.print(message)) {
+    Serial.println("- file written");
+  } else {
+    Serial.println("- frite failed");
+  }
 }
 
 void getTemp()
@@ -157,10 +250,17 @@ void setup()
   WiFi.mode(WIFI_STA);
   Serial.begin(115200);
 
+  // Initialize SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("An Error has occurred while mounting SPIFFS");
+    return;
+  }
+
   WiFi.begin();
 
-  if (WiFi.waitForConnectResult() != WL_CONNECTED) { //~ 100 * 100ms
-    Serial.printf("WiFi Failed!\n");
+  if (WiFi.waitForConnectResult() == WL_DISCONNECTED ||
+      WiFi.waitForConnectResult() == WL_NO_SSID_AVAIL) { //~ 100 * 100ms
+    Serial.printf("WiFi Failed!: %u\n", WiFi.status());
     captiveServer();
     // your other setup stuff...
     WiFi.softAP("esp-captive");
@@ -206,12 +306,16 @@ void setup()
       request->send_P(200, "text/html", HTTP_UPDATE, processor);
     });
 
+    server.on("/notify", HTTP_GET, [](AsyncWebServerRequest *request) {
+      notify("hi", strlen("hi"));
+      request->send_P(200, "text/plain", "OK");
+    });
+
     server.on(
         "/u", HTTP_POST,
         [](AsyncWebServerRequest *request) {
-          bool shouldReboot                = !Update.hasError();
           AsyncWebServerResponse *response = request->beginResponse(
-              200, "text/plain", shouldReboot ? "OK" : "FAIL");
+              200, "text/plain", Update.hasError() ? "OK" : "FAIL");
           response->addHeader("Connection", "close");
           request->send(response);
         },
