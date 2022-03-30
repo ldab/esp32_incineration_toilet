@@ -1,351 +1,383 @@
-/******************************************************************************
-main.cpp
-ESP32/ESP8266 based Toilet controller, thermocouple type K, MAX31855
-Leonardo Bispo
-March, 2022
-https://github.com/ldab/toilet_controller
-Distributed as-is; no warranty is given.
-******************************************************************************/
+#include "Arduino.h"
+#include <Ticker.h>
 
-#define BLYNK_PRINT Serial // Defines the object that is used for printing
-// #define BLYNK_DEBUG        // Optional, this enables more detailed prints
-// #define APP_DEBUG
-
-#include <Arduino.h>
-
-// Blynk and WiFi
-
-#define USE_SSL
-
-#if defined(ESP32)
+#include <DNSServer.h>
 #include <ESPmDNS.h>
+
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <Update.h>
 #include <WiFi.h>
-#ifdef USE_SSL
-#include <BlynkSimpleEsp32_SSL.h>
+
+#include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#else
-#include <BlynkSimpleEsp32.h>
-#include <WiFiClient.h>
-#endif
-#endif
 
-#include "BlynkEdgent.h"
+#include "SPIFFS.h"
 
-#include "PapertrailLogger.h"
+#include "html_strings.h"
 
-// OTA
-#include <ArduinoOTA.h>
-#include <WiFiUdp.h>
+String ssid, pass;
 
-// MAX31855
-#include <SPI.h>
-#include <Wire.h>
+const char *serverPath = "/server.txt";
+const char *tokenPath  = "/token.txt";
 
-#include "Adafruit_MAX31855.h"
+Ticker tempTimer;
+Ticker restart;
 
-#ifdef VERBOSE
-#define DBG(msg, ...)                                                          \
-  {                                                                            \
-    Serial.printf("[%lu] " msg, millis(), ##__VA_ARGS__);                      \
-  }
-#else
-#define DBG(...)
-#endif
+DNSServer dnsServer;
+AsyncWebServer server(80);
+AsyncEventSource events("/events"); // event source (Server-Sent events)
+AsyncWebSocket ws("/ws");           // access at ws://[esp ip]/ws
 
-#define NOTIFY(msg, ...)                                                       \
-  {                                                                            \
-    char _msg[64] = "";                                                        \
-    sprintf(_msg, msg, ##__VA_ARGS__);                                         \
-    Blynk.logEvent("alarm", _msg);                                             \
-    DBG("%s\n", _msg);                                                         \
-  }
+String processor(const String &var);
+String readFile(fs::FS &fs, const char *path);
+void writeFile(fs::FS &fs, const char *path, const char *message);
 
-// https://randomnerdtutorials.com/esp32-pinout-reference-gpios/
-#define FAN               14
-#define FAN_FB            15
-#define ELEMENT           27
-#define SPI_CLK           5
-#define SPI_CS            18
-#define SPI_MISO          22
-#define FINAL_TEMPERATURE 550
-#define BIG_FLUSH         35
-#define DIFFERENTIAL      5 // degC
-
-float temp;
-float tInt;
-
-// Control variables
-uint32_t initMillis = 0;
-uint32_t holdMillis = 0;
-int step            = 0;
-
-// Timer instance numbers
-int controlTimer;
-
-PapertrailLogger *errorLog;
-Adafruit_MAX31855 thermocouple(SPI_CLK, SPI_CS, SPI_MISO);
-
-BLYNK_CONNECTED()
+class CaptiveRequestHandler : public AsyncWebHandler
 {
-  esp_reset_reason_t reset_reason = esp_reset_reason();
-  if (reset_reason == ESP_RST_PANIC || reset_reason == ESP_RST_INT_WDT ||
-      reset_reason == ESP_RST_TASK_WDT || reset_reason == ESP_RST_WDT ||
-      reset_reason == ESP_RST_BROWNOUT) {
-    Blynk.logEvent("wdt", reset_reason);
+  public:
+  CaptiveRequestHandler() {}
+  virtual ~CaptiveRequestHandler() {}
+
+  bool canHandle(AsyncWebServerRequest *request)
+  {
+    // request->addInterestingHeader("ANY");
+    return true;
   }
 
-  // TODO recover from cloud
+  void handleRequest(AsyncWebServerRequest *request)
+  {
+    request->send_P(200, "text/html", HTTP_CONFIG, processor);
+  }
+};
 
-  else if (!edgentTimer.isEnabled(controlTimer)) {
-    Blynk.virtualWrite(V7, "Idle 💤");
-    Blynk.virtualWrite(V10, LOW);
+void espRestart() { ESP.restart(); }
+
+// Send notification to HA, max 32 bytes
+void notify(char *msg, size_t length)
+{
+  HTTPClient http;
+  WiFiClientSecure client;
+
+  String url   = readFile(SPIFFS, serverPath);
+  String token = readFile(SPIFFS, tokenPath);
+
+  // client.setCACert(CA_CERT);
+  client.setInsecure();
+  if (!client.connect(url.c_str(), 8123))
+    Serial.println("Connection failed!");
+  else {
+    char _msg[32];
+    sprintf(_msg, "Content-Length: %u", 15 + length);
+    client.println("POST /api/services/notify/notify HTTP/1.1");
+    client.print("Host: ");
+    client.println(url);
+    client.println("Content-Type: application/json");
+    client.println("Content-Length: 17");
+    client.print("Authorization: Bearer ");
+    client.println(token);
+    client.println();
+    sprintf(_msg, "{\"message\": \"%s\"}\n", msg);
+    Serial.println(_msg);
+    client.println(_msg);
+
+    // while (client.connected()) {
+    //   String line = client.readStringUntil('\n');
+    //   if (line == "\r") {
+    //     break;
+    //   }
+    //   Serial.println(line);
+    // }
+    // // if there are incoming bytes available
+    // // from the server, read them and print them:
+    // while (client.available()) {
+    //   char c = client.read();
+    //   Serial.write(c);
+    // }
+    client.stop();
   }
 }
 
-BLYNK_WRITE(V50) { step = param.asInt(); }
-
-BLYNK_WRITE(V10)
+void onUpload(AsyncWebServerRequest *request, String filename, size_t index,
+              uint8_t *data, size_t len, bool final)
 {
-  uint8_t flushButton = param.asInt();
+  if (!index) {
+    Serial.printf("Update Start: %s\n", filename.c_str());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+  }
+  Serial.printf("Progress: %u of %u\r", Update.progress(), Update.size());
+  if (!Update.hasError()) {
+    if (Update.write(data, len) != len) {
+      Update.printError(Serial);
+    }
+  }
+  if (final) {
+    if (Update.end(true)) {
+      Serial.printf("Update Success: %uB\n", index + len);
+      request->redirect("/");
+      restart.once_ms(1000, espRestart);
+    } else {
+      Update.printError(Serial);
+    }
+  }
+}
 
-  if (flushButton && !edgentTimer.isEnabled(controlTimer)) {
-    step       = 0;
-    initMillis = millis();
-    digitalWrite(FAN, HIGH);
-    Blynk.virtualWrite(V7, "Flushing 🔥💩");
-    edgentTimer.enable(controlTimer);
+void onRequest(AsyncWebServerRequest *request)
+{
+  // Handle Unknown Request
+  request->send(404, "text/plain", "OUCH");
+}
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
+             AwsEventType type, void *arg, uint8_t *data, size_t len)
+{
+  // Handle WebSocket event
+}
+
+String processor(const String &var)
+{
+  Serial.print("processor:");
+  Serial.println(var);
+
+  if (var == "CSS_TEMPLATE")
+    return FPSTR(HTTP_STYLE);
+  if (var == "INDEX_JS")
+    return FPSTR(HTTP_JS);
+  if (var == "HTML_HEAD_TITLE")
+    return FPSTR(HTML_HEAD_TITLE);
+  if (var == "HTML_INFO_BOX") {
+    String ret = "";
+    if (WiFi.isConnected()) {
+      ret = "<strong> Connected</ strong> to ubx<br><em><small> with IP ";
+      ret += WiFi.localIP().toString();
+      ret += "</small>";
+    } else
+      ret = "<strong> Not Connected</ strong>";
+
+    return ret;
+  }
+  return String();
+}
+
+void captiveServer()
+{
+  server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) {
+    int params = request->params();
+    for (int i = 0; i < params; i++) {
+      AsyncWebParameter *p = request->getParam(i);
+      if (p->isPost()) {
+        // HTTP POST ssid value
+        if (p->name() == "ssid") {
+          ssid = p->value().c_str();
+          Serial.print("SSID set to: ");
+          Serial.println(ssid);
+        }
+        if (p->name() == "pass") {
+          pass = p->value().c_str();
+          Serial.print("Password set to: ");
+          Serial.println(pass);
+        }
+        if (p->name() == "server") {
+          String url = p->value().c_str();
+          writeFile(SPIFFS, serverPath, url.c_str());
+        }
+        if (p->name() == "token") {
+          String token = p->value().c_str();
+          writeFile(SPIFFS, tokenPath, token.c_str());
+        }
+      }
+    }
+    WiFi.persistent(true);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    Serial.print("Connecting to WiFi ..");
+    while (WiFi.status() != WL_CONNECTED) {
+      Serial.print('.');
+      delay(100);
+    }
+    Serial.println("connected");
+    restart.once_ms(1000, espRestart);
+    request->redirect("http://" + WiFi.localIP().toString());
+  });
+}
+
+// Read File from SPIFFS
+String readFile(fs::FS &fs, const char *path)
+{
+  Serial.printf("Reading file: %s\r\n", path);
+
+  File file = fs.open(path);
+  if (!file || file.isDirectory()) {
+    Serial.println("- failed to open file for reading");
+    return String();
+  }
+
+  String fileContent;
+  while (file.available()) {
+    fileContent = file.readStringUntil('\n');
+    break;
+  }
+  return fileContent;
+}
+
+// Write file to SPIFFS
+void writeFile(fs::FS &fs, const char *path, const char *message)
+{
+  Serial.printf("Writing file: %s\r\n", path);
+
+  File file = fs.open(path, FILE_WRITE);
+  if (!file) {
+    Serial.println("- failed to open file for writing");
+    return;
+  }
+  if (file.print(message)) {
+    Serial.println("- file written");
   } else {
-    DBG("Already flushing\n"); // TODO increase timer
-    Blynk.virtualWrite(V10, HIGH);
+    Serial.println("- frite failed");
   }
-}
-
-void sendData()
-{
-  Blynk.virtualWrite(V0, temp);
-  Blynk.virtualWrite(V8, tInt);
-  Blynk.virtualWrite(V50, step);
-  Blynk.virtualWrite(V51, WiFi.RSSI());
-
-  if (edgentTimer.isEnabled(controlTimer)) {
-    Blynk.virtualWrite(V5, (int)((millis() - initMillis) / (60 * 1000)));
-  }
-}
-
-void safetyCheck()
-{
-  // TODO check if takes too long
-  //  (int)((millis() - initMillis) / (60 * 1000))
-
-  // check if temp still rises after step == 1;
-
-  // Check if fan is running
 }
 
 void getTemp()
 {
-  static float _t   = 0;
-  static uint8_t _s = 0;
-  static bool tErr  = false;
-
-  temp              = thermocouple.readCelsius();
-  tInt              = thermocouple.readInternal();
-  uint8_t error     = thermocouple.readError();
-
-  // average 5x samples
-  _t += temp;
-  _s++;
-  if (_s == 4) {
-    temp = (float)(_t / _s);
-    _t   = 0;
-    _s   = 0;
-  }
-
-  // Ignore SCG fault
-  // https://forums.adafruit.com/viewtopic.php?f=31&t=169135#p827564
-  if (error & 0b001) {
-    DBG("Thermocouple error #%i\n", error);
-    if (!tErr) {
-      temp = NAN;
-      tErr = true;
-
-      Blynk.logEvent("thermocouple_error", error);
-
-      digitalWrite(ELEMENT, LOW);
-    }
-  } else {
-    tErr = false;
-    DBG("T: %.02fdegC\n", temp);
-    DBG("tInt: %.02fdegC\n", tInt);
-  }
-}
-
-void holdTimer(uint32_t _segment)
-{
-  if (holdMillis == 0) {
-    DBG("Start hold for %dmin\n", _segment);
-    holdMillis = millis();
-  }
-  uint32_t _elapsed = (millis() - holdMillis) / (60 * 1000);
-  String _remaining = String(_segment - _elapsed);
-  DBG("Remaining: %s\n", _remaining.c_str());
-  Blynk.virtualWrite(V7, "Burning 🔥💩" + _remaining + " min");
-
-  if (_elapsed >= _segment) {
-    step++;
-    holdMillis = 0;
-    DBG("Done with hold, step: %d\n", step);
-    Blynk.virtualWrite(V7, "Flushing 🔥💩");
-  }
-}
-
-void tControl()
-{
-  DBG("Control ST: %udegC, step: %u\n", FINAL_TEMPERATURE, step);
-  static uint8_t diff;
-
-  if (step == 1) {
-    if (digitalRead(ELEMENT)) {
-      digitalWrite(ELEMENT, LOW);
-
-      uint8_t h = (millis() - initMillis) / (1000 * 3600);
-      uint8_t m = ((millis() - initMillis) - (h * 3600 * 1000)) / (60 * 1000);
-      char endInfo[64];
-      sprintf(endInfo, "Finished flushing after, after: %d:%d", h, m);
-      DBG("%s", endInfo);
-      Blynk.logEvent("info", endInfo);
-      Blynk.virtualWrite(V10, LOW);
-      Blynk.virtualWrite(V7, "Cooling ❄️");
-    }
-    if (temp <= 100) {
-      DBG("Finished cooling\n");
-      step++;
-    }
-    return;
-  }
-  if (step == 2) {
-    digitalWrite(FAN, LOW);
-    digitalWrite(ELEMENT, LOW); // just in case
-    ESP.restart();
-    return;
-  }
-
-  if (!isnan(temp)) {
-    DBG("Control relay \n");
-    float delta_t = FINAL_TEMPERATURE - temp - diff;
-    if (delta_t >= 0) {
-      if (!digitalRead(ELEMENT)) {
-        digitalWrite(ELEMENT, HIGH);
-        DBG("RELAY ON \n");
-        diff = 0;
-      }
-    } else if (digitalRead(ELEMENT)) {
-      digitalWrite(ELEMENT, LOW);
-      DBG("RELAY OFF \n");
-      diff = DIFFERENTIAL;
-    }
-    if (temp > FINAL_TEMPERATURE) {
-      holdTimer(BIG_FLUSH);
-    }
-  }
-}
-
-void IRAM_ATTR ISR()
-{
-  static volatile uint32_t count      = 0;
-  static volatile uint32_t lastMillis = 0;
-  count++;
-  if (lastMillis == 0)
-    lastMillis = millis();
-}
-
-void pinInit()
-{
-  pinMode(FAN, OUTPUT);
-  digitalWrite(FAN, LOW);
-
-  pinMode(ELEMENT, OUTPUT);
-  digitalWrite(ELEMENT, LOW);
-
-  attachInterrupt(FAN_FB, ISR, FALLING);
-}
-
-void otaInit()
-{
-  ArduinoOTA.setHostname("toilet");
-
-  ArduinoOTA.onStart([]() {
-    String type;
-    if (ArduinoOTA.getCommand() == U_FLASH) {
-      type = "sketch";
-    } else { // U_FS
-      type = "filesystem";
-    }
-
-    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
-    Serial.println("Start updating " + type);
-  });
-  ArduinoOTA.onEnd([]() { Serial.println("\nEnd"); });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) {
-      Serial.println("Auth Failed");
-    } else if (error == OTA_BEGIN_ERROR) {
-      Serial.println("Begin Failed");
-    } else if (error == OTA_CONNECT_ERROR) {
-      Serial.println("Connect Failed");
-    } else if (error == OTA_RECEIVE_ERROR) {
-      Serial.println("Receive Failed");
-    } else if (error == OTA_END_ERROR) {
-      Serial.println("End Failed");
-    }
-  });
-
-  ArduinoOTA.begin();
+  char msg[5];
+  sprintf(msg, "%i", WiFi.RSSI());
+  events.send(msg, "temperature");
 }
 
 void setup()
 {
-#ifdef VERBOSE
+  WiFi.mode(WIFI_STA);
   Serial.begin(115200);
-  DBG("VERSION %s\n", BLYNK_FIRMWARE_VERSION);
-#endif
 
-#ifdef CALIBRATE
-  // Measure GPIO in order to determine Vref to gpio 25 or 26 or 27
-  adc2_vref_to_gpio(GPIO_NUM_25);
-  delay(5000);
-  abort();
-#endif
+  // Initialize SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("An Error has occurred while mounting SPIFFS");
+    return;
+  }
 
-  pinInit();
+  WiFi.begin();
 
-  DBG("resetreason %u\n", esp_reset_reason());
+  if (WiFi.waitForConnectResult() == WL_DISCONNECTED ||
+      WiFi.waitForConnectResult() == WL_NO_SSID_AVAIL) { //~ 100 * 100ms
+    Serial.printf("WiFi Failed!: %u\n", WiFi.status());
+    captiveServer();
+    // your other setup stuff...
+    WiFi.softAP("esp-captive");
+    dnsServer.start(53, "*", WiFi.softAPIP());
 
-  if (!thermocouple.begin()) {
-    DBG("ERROR.\n");
-    // while (1) delay(10);
-  } else
-    DBG("MAX31855 Good\n");
+    Serial.print("started at:");
+    Serial.println(WiFi.softAPIP());
 
-  // wifi_station_set_hostname("kiln"); //setHostname
-  BlynkEdgent.begin();
+    server.addHandler(new CaptiveRequestHandler())
+        .setFilter(ON_AP_FILTER); // only when requested from AP
+  } else {
+    Serial.printf("WiFi Connected!\n");
+    Serial.println(WiFi.localIP());
 
-  otaInit();
+    MDNS.begin("leo_esp32");
 
-  edgentTimer.setInterval(2000L, getTemp);
-  edgentTimer.setInterval(10000L, sendData);
+    server.addHandler(&events);
 
-  controlTimer = edgentTimer.setInterval(5530L, tControl);
-  edgentTimer.disable(controlTimer); // enable it after button is pressed
+    events.onConnect([](AsyncEventSourceClient *client) {
+      if (client->lastId()) {
+        Serial.printf(
+            "Client reconnected! Last message ID that it got is: %u\n",
+            client->lastId());
+      }
+      // send event with message "hello!", id current millis
+      // and set reconnect delay to 1 second
+      client->send("hello!", NULL, millis(), 10000);
+    });
+
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->send_P(200, "text/html", HTTP_INDEX, processor);
+    });
+
+    server.on("/setup", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->send_P(200, "text/html", HTTP_CONFIG, processor);
+    });
+
+    server.on("/info", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->send_P(200, "text/html", HTTP_INFO, processor);
+    });
+
+    server.on("/update", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->send_P(200, "text/html", HTTP_UPDATE, processor);
+    });
+
+    server.on("/notify", HTTP_GET, [](AsyncWebServerRequest *request) {
+      notify("hi", strlen("hi"));
+      request->send_P(200, "text/plain", "OK");
+    });
+
+    server.on(
+        "/u", HTTP_POST,
+        [](AsyncWebServerRequest *request) {
+          AsyncWebServerResponse *response = request->beginResponse(
+              200, "text/plain", Update.hasError() ? "OK" : "FAIL");
+          response->addHeader("Connection", "close");
+          request->send(response);
+        },
+        onUpload);
+
+    server.on("/gpio", HTTP_GET, [](AsyncWebServerRequest *request) {
+      String inputMessage1;
+      String inputMessage2;
+      // GET input1 value on
+      // <ESP_IP>/gpio?output=<inputMessage1>&state=<inputMessage2>
+      if (request->hasParam("output") && request->hasParam("state")) {
+        inputMessage1 = request->getParam("output")->value();
+        inputMessage2 = request->getParam("state")->value();
+        digitalWrite(inputMessage1.toInt(), inputMessage2.toInt());
+      } else {
+        inputMessage1 = "No message sent";
+        inputMessage2 = "No message sent";
+      }
+      Serial.print("GPIO: ");
+      Serial.print(inputMessage1);
+      Serial.print(" - Set to: ");
+      Serial.println(inputMessage2);
+      request->send(200, "text/plain", "OK");
+    });
+
+    server.on("/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+      String json = "[";
+      int n       = WiFi.scanComplete();
+      if (n == WIFI_SCAN_FAILED)
+        WiFi.scanNetworks(false, false, false, 100);
+
+      n = WiFi.scanComplete();
+
+      if (n) {
+        for (int i = 0; i < n; ++i) {
+          if (i)
+            json += ",";
+          json += "{";
+          json += "\"rssi\":" + String(WiFi.RSSI(i));
+          json += ",\"ssid\":\"" + WiFi.SSID(i) + "\"";
+          json += ",\"bssid\":\"" + WiFi.BSSIDstr(i) + "\"";
+          json += ",\"channel\":" + String(WiFi.channel(i));
+          json += ",\"secure\":" + String(WiFi.encryptionType(i));
+          json += "}";
+        }
+        WiFi.scanDelete();
+      }
+      json += "]";
+      Serial.println(json);
+      request->send(200, "application/json", json);
+      json = String();
+    });
+
+    tempTimer.attach(2, getTemp);
+  }
+
+  server.onNotFound(onRequest);
+  server.begin();
 }
 
 void loop()
 {
-  ArduinoOTA.handle();
-  BlynkEdgent.run();
-  //  timer.run(); // use edgentTimer
+  if (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA)
+    dnsServer.processNextRequest();
 }

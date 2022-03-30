@@ -2,7 +2,7 @@
 
 Need to replace the old controller on the incineration toilet - why not?-> esp32, max31855, thermocouple type K, relays.
 
-[![GitHub version](https://img.shields.io/github/release/ldab/esp32_incineration_toilet.svg)](https://github.com/ldab/esp32_incineration_toilet/releases/latest)
+[![GitHub version](https://img.shields.io/github/v/release/ldab/esp32_incineration_toilet.svg?include_prereleases)](https://github.com/ldab/esp32_incineration_toilet/releases/latest)
 ![Build Status](https://github.com/ldab/esp32_incineration_toilet/actions/workflows/workflow.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://github.com/ldab/esp32_incineration_toilet/LICENSE)
 
@@ -39,6 +39,10 @@ Total: **€120.00**
 ## Known Limitations
 
 * 
+
+https://github.com/espressif/arduino-esp32/blob/master/libraries/ESPmDNS/examples/mDNS_Web_Server/mDNS_Web_Server.ino
+
+https://randomnerdtutorials.com/esp32-wi-fi-manager-asyncwebserver/
 
 ## Credits
 
