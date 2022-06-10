@@ -5,6 +5,6 @@
 #include "info.h"
 #include "js.h"
 #include "style.h"
-#include "ota.h"
+#include "OTA.h"
 
 const char HTML_HEAD_TITLE[] PROGMEM = "Toilety";
