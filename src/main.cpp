@@ -231,10 +231,13 @@ void led(led_color_t color)
 // Send notification to HA, max 32 bytes
 void notify(char *msg, size_t length)
 {
-  DBG("%s\n", msg);
+  char _msg[128];
+  sprintf(_msg, "%s - %s", hostname.c_str(), msg);
+  DBG("%s\n", _msg);
+
   char topic[64] = {'\0'};
   sprintf(topic, "%s/f/notify", mqtt_user);
-  mqttClient.publish(topic, 0, false, msg, length);
+  mqttClient.publish(topic, 0, false, _msg, strlen(_msg));
 }
 
 void onUpload(AsyncWebServerRequest *request, String filename, size_t index,
@@ -368,8 +371,8 @@ void captiveServer()
 {
   server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) {
     int params = request->params();
-    StaticJsonDocument<192> doc;
-    char output[192] = {'\0'};
+    StaticJsonDocument<384> doc;
+    char output[384] = {'\0'};
     for (int i = 0; i < params; i++) {
       AsyncWebParameter *p = request->getParam(i);
       if (p->isPost()) {
@@ -457,107 +460,6 @@ void writeFile(fs::FS &fs, const char *path, const char *message)
 int segments[4][3]     = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
 const char *p_segments = "/segments.txt";
 
-void onFire(AsyncWebServerRequest *request)
-{
-  int params = request->params();
-
-  for (int i = 0; i < params; i++) {
-    AsyncWebParameter *p = request->getParam(i);
-    if (p->isPost()) {
-      if (p->name() == "s00")
-        segments[0][0] = p->value().toInt();
-      if (p->name() == "s01")
-        segments[0][1] = p->value().toInt();
-      if (p->name() == "s02")
-        segments[0][2] = p->value().toInt();
-      if (p->name() == "s10")
-        segments[1][0] = p->value().toInt();
-      if (p->name() == "s11")
-        segments[1][1] = p->value().toInt();
-      if (p->name() == "s12")
-        segments[1][2] = p->value().toInt();
-      if (p->name() == "s20")
-        segments[2][0] = p->value().toInt();
-      if (p->name() == "s21")
-        segments[2][1] = p->value().toInt();
-      if (p->name() == "s22")
-        segments[2][2] = p->value().toInt();
-      if (p->name() == "s30")
-        segments[3][0] = p->value().toInt();
-      if (p->name() == "s31")
-        segments[3][1] = p->value().toInt();
-      if (p->name() == "s32")
-        segments[3][2] = p->value().toInt();
-    }
-  }
-
-  for (size_t i = 0; i < sizeof(segments) / sizeof(segments[0]); i++) {
-    for (size_t j = 0; j < sizeof(segments[0]) / (sizeof(int)) - 1; j++) {
-      if (segments[i][j] == 0) {
-        DBG("Check the settings, i: %u j: %u\n", i, j);
-        return;
-      }
-    }
-  }
-
-  if (/*segments[3][0] < segments[2][0] ||*/ segments[2][0] < segments[1][0] ||
-      segments[1][0] < segments[0][0]) {
-    DBG("Invalid Target temperature");
-    return;
-  }
-
-  StaticJsonDocument<384> doc;
-  char output[384]   = {'\0'};
-
-  JsonObject preheat = doc.createNestedObject("preheat");
-  preheat["st"]      = segments[0][0];
-  preheat["r"]       = segments[0][1];
-  preheat["h"]       = segments[0][2];
-
-  JsonObject step1   = doc.createNestedObject("step1");
-  step1["st"]        = segments[1][0];
-  step1["r"]         = segments[1][1];
-  step1["h"]         = segments[1][2];
-
-  JsonObject step2   = doc.createNestedObject("step2");
-  step2["st"]        = segments[2][0];
-  step2["r"]         = segments[2][1];
-  step2["h"]         = segments[2][2];
-
-  JsonObject final   = doc.createNestedObject("final");
-  final["st"]        = segments[3][0];
-  final["r"]         = segments[3][1];
-  final["h"]         = segments[3][2];
-
-  serializeJson(doc, output);
-  writeFile(SPIFFS, p_segments, output);
-
-  if (true) { // TODO check disable button
-    initMillis = millis();
-    int tTotal = (segments[0][0] - temp) / segments[0][1] * 60 + segments[0][2];
-    tTotal += (segments[1][0] - segments[0][0]) * 60 / segments[1][1] +
-              segments[1][2];
-    tTotal += (segments[2][0] - segments[1][0]) * 60 / segments[2][1] +
-              segments[2][2];
-    tTotal += (segments[3][0] - segments[2][0]) * 60 / segments[3][1] +
-              segments[3][2];
-
-    DBG("tTotal %dmin\n", tTotal);
-
-    info = "Firing 🔥 @" + String(segments[step][0]) + "°C";
-    led(PURPLE);
-
-    printSegments();
-    rampRate();
-    controlTimer.attach_ms(5530L, tControl);
-    rampTimer.attach_ms(RATEUPDATE * 1000L, rampRate);
-  } else {
-    DBG("Button pressed, disable temp control\n");
-    writeFile(SPIFFS, p_segments, "");
-    restart.once_ms(1000, espRestart);
-  }
-}
-
 void onFire(String input)
 {
   StaticJsonDocument<384> doc;
@@ -589,9 +491,13 @@ void onFire(String input)
   else if (temp > segments[0][0])
     step = 1;
 
+  // empty parameters (toilet)
+  if (segments[3][0] == 0)
+    step = 0;
+
   currentSetpoint = temp;
 
-  info            = "Firing 🔥 @" + String(segments[step][0]) + "°C";
+  info            = "Flushing 🔥 @" + String(segments[step][0]) + "°C";
 
   printSegments();
   rampRate();
@@ -788,7 +694,7 @@ void holdTimer(uint32_t _segment)
     holdMillis = 0;
     rampTimer.attach_ms(RATEUPDATE * 1000L, rampRate);
     DBG("Done with hold, step: %d\n", step);
-    info = "Firing 🔥 @" + String(segments[step][0]) + "°C";
+    info = "Flushing 🔥 @" + String(segments[step][0]) + "°C";
     events.send(info.c_str(), "display");
   }
 }
@@ -874,20 +780,28 @@ void readButton()
 {
   uint8_t buttons = lcd.readButtons();
 
-  if (!(buttons & 0x01))
+  if (!(buttons & 0x01)) {
     button = 1; // onFire()
+    onFire("{\"preheat\":{\"st\":550,\"r\":550,\"h\":15}}");
+  }
 
-  else if (!(buttons & 0x02))
+  else if (!(buttons & 0x02)) {
     button = 2; // onFire()
+    onFire("{\"preheat\":{\"st\":550,\"r\":550,\"h\":35}}");
+  }
 
-  else if (!(buttons & 0x04))
+  else if (!(buttons & 0x04)) {
     button = 3; // FAN
+  }
 
-  else if (!(buttons & 0x08))
+  else if (!(buttons & 0x08)) {
     button = 4; // Cancel
+  }
 
   else
     button = 0;
+
+  DBG("Button %d pressed\n", button);
 }
 
 void pinInit()
@@ -904,6 +818,18 @@ void pinInit()
   ledOff();
 }
 
+void lcdMenu()
+{
+  lcd.lcdGoToXY(2, 1);
+  lcd.lcdWrite((char *)"Pee");
+
+  lcd.lcdGoToXY(10, 1);
+  lcd.lcdWrite((char *)"Poo");
+
+  lcd.lcdGoToXY(2, 2);
+  lcd.lcdWrite((char *)"Fan");
+}
+
 void lcdInit()
 {
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -912,14 +838,10 @@ void lcdInit()
   lcd.lcdClear();
   lcd.lcdSetBlacklight(128);
 
-  lcd.lcdGoToXY(2, 1);
-  lcd.lcdWrite("Pee");
+  lcd.lcdGoToXY(1, 1);
+  lcd.lcdWrite((char *)"Standby");
 
-  lcd.lcdGoToXY(10, 1);
-  lcd.lcdWrite("Poo");
-
-  lcd.lcdGoToXY(2, 2);
-  lcd.lcdWrite("Fan");
+  lcdMenu();
 }
 
 void onMqttConnect(bool sessionPresent) { DBG("Connected to MQTT.\n"); }
@@ -1011,6 +933,7 @@ void setup()
 #endif
 
   pinInit();
+  lcdInit();
   led(RED);
 
   mqttReconnectTimer =
@@ -1056,10 +979,10 @@ void setup()
     configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "0.pool.ntp.org",
                  "1.pool.ntp.org");
 
-    char input[192] = {'\0'};
+    char input[256] = {'\0'};
     sprintf(input, "%s", readFile(SPIFFS, p_mqtt).c_str());
 
-    StaticJsonDocument<64> doc;
+    StaticJsonDocument<256> doc;
     DeserializationError error = deserializeJson(doc, input);
 
     if (error) {
@@ -1098,20 +1021,24 @@ void setup()
       request->send_P(200, "text/html", HTTP_INDEX, processor);
     });
 
-    server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) {
-      onFire(request);
-      request->send_P(200, "text/html", HTTP_INDEX, processor);
-    });
-
     server.on("/small", HTTP_GET, [](AsyncWebServerRequest *request) {
       request->redirect("/");
-      onFire("{}");
+      onFire("{\"preheat\":{\"st\":550,\"r\":550,\"h\":15}}");
     });
 
     server.on("/big", HTTP_GET, [](AsyncWebServerRequest *request) {
       request->redirect("/");
-      onFire("{}");
-      ;
+      onFire("{\"preheat\":{\"st\":550,\"r\":550,\"h\":35}}");
+    });
+
+    server.on("/fan", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->redirect("/");
+      digitalWrite(FAN, HIGH);
+    });
+
+    server.on("/abort", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->redirect("/");
+      restart.once_ms(1000, espRestart);
     });
 
     server.on("/info", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -1158,7 +1085,13 @@ void setup()
       json = String();
     });
 
-    buttonTimer.attach_ms(500, readButton);
+    uint8_t lcdID = lcd.getID();
+    DBG("getID(): 0x%02X", lcdID);
+
+    if (lcdID == 0x65) {
+      buttonTimer.attach_ms(500, readButton);
+    }
+
     tempTimer.attach(2, getTemp);
     sendTimer.attach_ms(10000L, sendData);
 
