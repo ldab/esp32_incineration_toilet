@@ -83,7 +83,7 @@ extern "C" {
 #define SPI_CLK      23
 #define I2C_SDA      12
 #define I2C_SCL      14
-#define LCD_RST      13 // WROOM pin16
+#define LCD_RST      33 // WROOM pin9
 
 #define COSTKWH      2.5
 
@@ -592,6 +592,9 @@ void safetyCheck()
   }
 
   // TODO long time for cooling == fan problem
+
+  if (temp < 100 && step == 5)
+    restart.once_ms(1000, espRestart);
 }
 
 void printSegments()
@@ -729,6 +732,12 @@ void rampDown()
     tControl();
     writeFile(SPIFFS, p_segments, "");
     info = "Cooling ❄️";
+
+    lcd.lcdClear();
+    lcd.lcdGoToXY(1, 1);
+    lcd.lcdWrite((char *)"Cooling");
+    lcdMenu();
+
     events.send(info.c_str(), "display");
   }
 
@@ -777,11 +786,6 @@ void tControl()
       }
     }
   }
-
-  lcd.lcdClear();
-  lcd.lcdGoToXY(1, 1);
-  lcd.lcdWrite((char *)("Flushing: " + String(temp, 0) + " C").c_str());
-  lcdMenu();
 }
 
 void rampRate()
