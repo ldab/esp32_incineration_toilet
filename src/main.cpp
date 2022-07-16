@@ -83,6 +83,7 @@ extern "C" {
 #define SPI_CLK      23
 #define I2C_SDA      12
 #define I2C_SCL      14
+#define LCD_RST      13 // WROOM pin16
 
 #define COSTKWH      2.5
 
@@ -497,9 +498,9 @@ void onFire(String input)
   if (segments[3][0] == 0)
     step = 0;
 
-  currentSetpoint = temp;
-
   info            = "Flushing 🔥 @" + String(segments[step][0]) + " C";
+  initMillis      = millis();
+  currentSetpoint = temp;
 
   lcd.lcdClear();
   lcd.lcdGoToXY(1, 1);
@@ -582,7 +583,14 @@ void safetyCheck()
     highTError = false;
   }
 
-  // TODO long time for heating == element problem
+  uint32_t elapsedTime = millis() - initMillis;
+
+  if (elapsedTime > 60 * 1000 * 1000 && step == 0 && rampTimer.active()) {
+    char msg[] = "Too long to heat, check element/thermostat";
+    notify(msg, strlen(msg));
+    step = 4;
+  }
+
   // TODO long time for cooling == fan problem
 }
 
@@ -784,7 +792,6 @@ void rampRate()
     currentSetpoint = temp;
 
   if (currentSetpoint >= segments[step][0]) {
-    // TODO alarm if takes too long
     currentSetpoint = segments[step][0];
   } else {
     currentSetpoint += (float)(segments[step][1] / (3600.0f / RATEUPDATE));
@@ -809,6 +816,7 @@ void readButton()
 
   else if (!(buttons & 0x04)) {
     button = 3; // FAN
+    digitalWrite(FAN, HIGH);
   }
 
   else if (!(buttons & 0x08)) {
@@ -826,6 +834,9 @@ void pinInit()
 
   pinMode(RELAY, OUTPUT);
   digitalWrite(RELAY, LOW);
+
+  pinMode(LCD_RST, OUTPUT);
+  digitalWrite(LCD_RST, HIGH);
 
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
@@ -847,6 +858,10 @@ void lcdMenu()
 
 void lcdInit()
 {
+  digitalWrite(LCD_RST, LOW);
+  delay(500);
+  digitalWrite(LCD_RST, HIGH);
+
   Wire.begin(I2C_SDA, I2C_SCL);
 
   uint16_t lcdID = lcd.getID();
