@@ -549,6 +549,7 @@ void safetyCheck()
 {
   static bool tIntError  = false;
   static bool noRlyError = false;
+  static bool highTError = false;
 
   // if (controlTimer.active()) {
   //   if (temp > (currentSetpoint + 10)) // TODO check differential
@@ -570,16 +571,19 @@ void safetyCheck()
     tIntError = false;
   }
 
-  if (digitalRead(RELAY)) {
-    if ((millis() - energyMillis) > 2000L) {
-      if (!noRlyError) {
-        notify((char *)"noRlyError", strlen("noRlyError"));
-        noRlyError = true;
-      }
-    } else {
-      noRlyError = true;
+  if (temp > 570) {
+    if (!highTError) {
+      char highTchar[32];
+      sprintf(highTchar, "High temp: %.1f°C", temp);
+      notify(highTchar, strlen(highTchar));
+      highTError = true;
     }
+  } else {
+    highTError = false;
   }
+
+  // TODO long time for heating == element problem
+  // TODO long time for cooling == fan problem
 }
 
 void printSegments()
