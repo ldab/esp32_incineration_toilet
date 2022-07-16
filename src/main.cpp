@@ -81,8 +81,8 @@ extern "C" {
 #define SPI_CS       22
 #define SPI_MISO     21
 #define SPI_CLK      23
-#define I2C_SDA      32
-#define I2C_SCL      33
+#define I2C_SDA      12
+#define I2C_SCL      14
 
 #define COSTKWH      2.5
 
@@ -151,6 +151,7 @@ void printSegments();
 void rampRate();
 void tControl();
 void getTemp();
+void lcdMenu();
 String processor(const String &var);
 String readFile(fs::FS &fs, const char *path);
 void writeFile(fs::FS &fs, const char *path, const char *message);
@@ -245,6 +246,7 @@ void onUpload(AsyncWebServerRequest *request, String filename, size_t index,
 {
   if (!index) {
     DBG("Update Start: %s\n", filename.c_str());
+    led(CYAN);
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       Update.printError(Serial);
     }
@@ -497,10 +499,16 @@ void onFire(String input)
 
   currentSetpoint = temp;
 
-  info            = "Flushing 🔥 @" + String(segments[step][0]) + "°C";
+  info            = "Flushing 🔥 @" + String(segments[step][0]) + " C";
+
+  lcd.lcdClear();
+  lcd.lcdGoToXY(1, 1);
+  lcd.lcdWrite((char *)("Flushing: " + String(temp, 0) + " C").c_str());
+  lcdMenu();
 
   printSegments();
   rampRate();
+  digitalWrite(FAN, HIGH);
   controlTimer.attach_ms(5530L, tControl);
   rampTimer.attach_ms(RATEUPDATE * 1000L, rampRate);
 }
@@ -757,6 +765,11 @@ void tControl()
       }
     }
   }
+
+  lcd.lcdClear();
+  lcd.lcdGoToXY(1, 1);
+  lcd.lcdWrite((char *)("Flushing: " + String(temp, 0) + " C").c_str());
+  lcdMenu();
 }
 
 void rampRate()
@@ -800,8 +813,6 @@ void readButton()
 
   else
     button = 0;
-
-  DBG("Button %d pressed\n", button);
 }
 
 void pinInit()
@@ -820,20 +831,22 @@ void pinInit()
 
 void lcdMenu()
 {
-  lcd.lcdGoToXY(2, 1);
+  lcd.lcdGoToXY(1, 2);
   lcd.lcdWrite((char *)"Pee");
 
-  lcd.lcdGoToXY(10, 1);
+  lcd.lcdGoToXY(5, 2);
   lcd.lcdWrite((char *)"Poo");
 
-  lcd.lcdGoToXY(2, 2);
+  lcd.lcdGoToXY(10, 2);
   lcd.lcdWrite((char *)"Fan");
 }
 
 void lcdInit()
 {
   Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(1000000);
+
+  uint16_t lcdID = lcd.getID();
+  DBG("getID(): 0x%02X\n", lcdID);
 
   lcd.lcdClear();
   lcd.lcdSetBlacklight(128);
@@ -1085,8 +1098,8 @@ void setup()
       json = String();
     });
 
-    uint8_t lcdID = lcd.getID();
-    DBG("getID(): 0x%02X", lcdID);
+    uint16_t lcdID = lcd.getID();
+    DBG("getID(): 0x%02X\n", lcdID);
 
     if (lcdID == 0x65) {
       buttonTimer.attach_ms(500, readButton);
