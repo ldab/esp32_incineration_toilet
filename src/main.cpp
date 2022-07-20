@@ -498,13 +498,17 @@ void onFire(String input)
   if (segments[3][0] == 0)
     step = 0;
 
-  info            = "Flushing 🔥 @" + String(segments[step][0]) + " C";
-  initMillis      = millis();
-  currentSetpoint = temp;
+  info             = "Flushing 🔥 @" + String(segments[step][0]) + " C";
+  initMillis       = millis();
+  currentSetpoint  = temp;
+
+  String flushType = segments[0][2] > 15 ? "Poo" : "Pee";
 
   lcd.lcdClear();
   lcd.lcdGoToXY(1, 1);
-  lcd.lcdWrite((char *)("Flushing: " + String(temp, 0) + " C").c_str());
+  lcd.lcdWrite(
+      (char *)("Flushing: " + String(segments[step][0]) + " C " + flushType)
+          .c_str());
   lcdMenu();
 
   printSegments();
@@ -683,8 +687,14 @@ void getTemp()
     sprintf(msg, "%.01f", temp);
 
     struct tm timeinfo;
-    if (((millis() - log) > (60 * 1000) || readings.size() == 0) &&
-        getLocalTime(&timeinfo)) {
+    if ((readings.size() == 0) && getLocalTime(&timeinfo)) {
+      time_t epoc = mktime(&timeinfo);
+      epocTime.push_back((long)epoc);
+      readings.push_back(temp);
+      DBG("strlen: %u\n", readings.size());
+      log = millis();
+    } else if (((millis() - log) > (60 * 1000) && controlTimer.active()) &&
+               getLocalTime(&timeinfo)) {
       time_t epoc = mktime(&timeinfo);
       epocTime.push_back((long)epoc);
       readings.push_back(temp);
@@ -706,7 +716,13 @@ void holdTimer(uint32_t _segment)
     DBG("Start hold for %dmin\n", _segment);
     holdMillis = millis();
     rampTimer.detach();
+
+    lcd.lcdClear();
+    lcd.lcdGoToXY(1, 1);
+    lcd.lcdWrite((char *)("Burning: " + String(_segment) + "min").c_str());
+    lcdMenu();
   }
+
   uint32_t _elapsed = (millis() - holdMillis) / (60 * 1000);
   info = "Hold: " + String(currentSetpoint, 0) + "°C-" + String(_elapsed) +
          "/" + String(_segment) + "min";
@@ -821,10 +837,12 @@ void readButton()
   else if (!(buttons & 0x04)) {
     button = 3; // FAN
     digitalWrite(FAN, HIGH);
+    restart.once_ms(15 * 60 * 1000, espRestart);
   }
 
   else if (!(buttons & 0x08)) {
     button = 4; // Cancel
+    restart.once_ms(1000, espRestart);
   }
 
   else
