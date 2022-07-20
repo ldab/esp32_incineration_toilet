@@ -8,7 +8,63 @@ function toggleCheckbox(element) {
   xhr.send();
 }
 
-window.addEventListener('load', getReadings);
+Highcharts.setOptions({
+    time: {
+        timezone: 'Europe/Stockholm'
+    }
+});
+
+const chart = Highcharts.chart('container', {
+    chart: {
+        type: 'spline',
+        zoomType: 'x'
+    },
+    title: {
+        text: ''
+    },
+    xAxis: {
+      type: 'datetime',
+      labels: {
+        enabled: false
+      }
+    },
+    yAxis: {
+        title: {
+            text: ''
+        },
+    },           
+    plotOptions: {
+        series: {
+            marker: {
+                enabled: false
+            }
+        }
+    },
+    series: [{
+        name: 'T',
+        data: (function() {        
+          var _d = %GRAPH_DATA%;
+          for (index = 0; index < _d.length; index++)
+          {
+            _d[index][0] = _d[index][0] * 1000;
+          }
+          return _d;
+        }()),
+        showInLegend: false
+    }]
+});
+
+// window.addEventListener('load', getReadings);
+
+function plotTemperature(t) {
+
+  var x = (new Date()).getTime();
+  // console.log(x);
+  // console.log(t);
+
+  chart.series[0].addPoint([x, t]);
+  // chart.series[0].addPoint(t);
+}
 
 function getReadings(){
   var xhr = new XMLHttpRequest();
@@ -41,8 +97,18 @@ if (!!window.EventSource) {
   }, false);
   
   source.addEventListener('temperature', function(e) {
-    console.log("temperature", e.data);
+    // console.log("temperature", e.data);
     document.getElementById("temperature").innerHTML = e.data;
+    plotTemperature(parseFloat(e.data));
+  }, false);
+
+  source.addEventListener('KW', function(e) {
+    // console.log("KW", e.data);
+    document.getElementById("KW").innerHTML = e.data;
+  }, false);
+
+  source.addEventListener('display', function(e) {
+    document.getElementById("display").innerHTML = e.data;
   }, false);
 }
 
