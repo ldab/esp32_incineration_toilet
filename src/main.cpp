@@ -589,13 +589,25 @@ void safetyCheck()
 
   uint32_t elapsedTime = millis() - initMillis;
 
-  if (elapsedTime > 60 * 1000 * 1000 && step == 0 && rampTimer.active()) {
+  if (elapsedTime > 70 * 60 * 1000 && step == 0 && rampTimer.active()) {
     char msg[] = "Too long to heat, check element/thermostat";
     notify(msg, strlen(msg));
     step = 4;
   }
 
-  // TODO long time for cooling == fan problem
+  // TODO: lastTem - temp < X => Alarm
+  if ((elapsedTime > (30 + 60 + 60 + segments[0][2]) * 60 * 1000) &&
+      step == 5) {
+    char msg[] = "FAN Problem";
+    notify(msg, strlen(msg));
+
+    lcd.lcdClear();
+    lcd.lcdGoToXY(1, 1);
+    lcd.lcdWrite(msg);
+    lcdMenu();
+
+    step = 6;
+  }
 
   if (temp < 100 && step == 5)
     restart.once_ms(1000, espRestart);
