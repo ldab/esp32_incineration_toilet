@@ -239,7 +239,7 @@ void notify(char *msg, size_t length)
 
   char topic[64] = {'\0'};
   sprintf(topic, "%s/f/notify", mqtt_user);
-  mqttClient.publish(topic, 0, false, _msg, strlen(_msg));
+  // mqttClient.publish(topic, 0, false, _msg, strlen(_msg));
 }
 
 void onUpload(AsyncWebServerRequest *request, String filename, size_t index,
@@ -541,7 +541,7 @@ void sendData()
   char topic[64] = {'\0'};
   sprintf(topic, "%s/g/%s/json", mqtt_user, hostname.c_str());
 
-  mqttClient.publish(topic, 0, false, payload, strlen(payload));
+  // mqttClient.publish(topic, 0, false, payload, strlen(payload));
 
   DBG("topic: %s\n", topic);
   DBG("Publish: %s\n", payload);
@@ -1008,7 +1008,7 @@ void setup()
 
   WiFi.mode(WIFI_STA);
   WiFi.onEvent(WiFiEvent);
-  WiFi.begin();
+  // WiFi.begin();
 
   // Initialize SPIFFS
   if (!SPIFFS.begin(true)) {
@@ -1022,7 +1022,7 @@ void setup()
   } else
     DBG("MAX31855 Good\n");
 
-  if (WiFi.waitForConnectResult() == WL_DISCONNECTED ||
+/*  if (WiFi.waitForConnectResult() == WL_DISCONNECTED ||
       WiFi.waitForConnectResult() == WL_NO_SSID_AVAIL) { //~ 100 * 100ms
     DBG("WiFi Failed!: %u\n", WiFi.status());
 
@@ -1044,7 +1044,7 @@ void setup()
 
     configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "0.pool.ntp.org",
                  "1.pool.ntp.org");
-
+*/
     char input[256] = {'\0'};
     sprintf(input, "%s", readFile(SPIFFS, p_mqtt).c_str());
 
@@ -1065,7 +1065,7 @@ void setup()
     strcpy(mqtt_user, u);
     strcpy(mqtt_pass, p);
     strcpy(mqtt_server, s);
-
+/*
     mqttClient.setServer(mqtt_server, 1883);
     mqttClient.setCredentials(mqtt_user, mqtt_pass);
 
@@ -1075,7 +1075,7 @@ void setup()
 
     MDNS.begin(h);
     hostname = String(h);
-
+*/
     server.addHandler(&events);
 
     events.onConnect([](AsyncEventSourceClient *client) {
@@ -1181,7 +1181,7 @@ void setup()
       String segmentRecover = readFile(SPIFFS, p_segments);
       if (segmentRecover.length())
         onFire(segmentRecover);
-    }
+    //}
 
     server.onNotFound(onRequest);
   }
@@ -1190,7 +1190,7 @@ void setup()
 
   safetyTimer.attach_ms(2115L, safetyCheck);
 
-  server.begin();
+  // server.begin();
 }
 
 void loop()
